@@ -1,0 +1,69 @@
+Initscript for running uWSGI daemon
+===================================
+
+N.B.: The features of the following initscript manuel tutorial are provided in the uwsgi
+binary package. See /usr/share/doc/uwsgi/README.Debian .
+
+There is an example of simple init.d script in
+/usr/share/doc/uwsgi-core/uwsgi-core.init.d.custom.gz
+
+Gunzip it to (something like) /etc/init.d/uwsgi-custom-daemon, then edit copied
+file and change:
+  * '# Provides:' comment and NAME variable with value of
+    'uwsgi-custom-daemon' (or whatever you've named copied file)
+  * UWSGI_UID, UWSGI_GID and DAEMON_ARGS variables with values suitable to your
+    needs
+
+Then execute:
+
+    chmod a+x /etc/init.d/uwsgi-custom-daemon
+    update-rc.d uwsgi-custom-daemon defaults
+
+And for removing your custom init.d script execute:
+
+    update-rc.d uwsgi-custom-daemon remove
+    rm /etc/init.d/uwsgi-custom-daemon
+
+Before starting of uWSGI daemon, manually create appropriate directories for
+logfiles and configuration files. Look for it's default values in value of
+DAEMON_ARGS variable.
+
+Controlling uWSGI instances using systemd
+=========================================
+
+(aka one service per app)
+
+Another approach is to let systemd handle starting individual apps while taking
+advantage of systemd template unit files, and of course socket activation. Each
+app will run under its own user.
+
+Adding a new app to your system is a matter of enabling the socket and
+the service. For instance, if one were to configure cgit:
+
+    # systemctl enable uwsgi-app@cgit.socket
+    # systemctl enable uwsgi-app@cgit.service
+    # systemctl start uwsgi-app@cgit.socket
+
+Then configure the ini file `/etc/uwsgi/apps-available/cgit.ini`:
+
+    [uwsgi]
+    master = True
+    cheap = True
+    idle = 600
+    die-on-idle = True # If app is not used often, it will exit and be launched
+                       # again by systemd as requested by users.
+
+    manage-script-name = True
+
+    plugins = 0:cgi
+    cgi = /usr/lib/cgit/cgit.cgi
+
+And last, if applicable, configure your HTTP server the usual way.
+
+Some services might need write access outside of their StateDirectory, but
+this is denied by `systemd` when using `DynamicUser`. If this is the case,
+an override can grant such access, for instance in
+`/etc/systemd/system/uwsgi-app\@nextcloud.service.d/override.conf`:
+
+    [Service]
+    ReadWritePaths=/srv/nextcloud/data

@@ -1,0 +1,12 @@
+0001_fix-missing-arginfo-php8.patch
+0002_zend_file_handler_sig_change_php81.patch
+1001_avoid_setting_RPATH.patch
+1002_fix-reload-process-name.patch
+1003_remove-php-libs.patch
+1005_avoid_auto_ptr.patch
+1006_avoid_xml2-config.patch
+1009_fix_java_paths.patch
+1010_support_java_pass_includes.patch
+1016_readline.patch
+1017_python3-compat.patch
+2001_ensure_verbose_build.patch

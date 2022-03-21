@@ -1,0 +1,95 @@
+Description: Avoid deprecated std::auto_ptr
+Author: Jonas Smedegaard <dr@jones.dk>
+Last-Update: 2016-11-12
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/plugins/emperor_mongodb/emperor_mongodb.cc
++++ b/plugins/emperor_mongodb/emperor_mongodb.cc
+@@ -26,23 +26,22 @@
+ 		// requested fields
+         	mongo::BSONObj p = BSON( "name" << 1 << "config" << 1 << "ts" << 1 << "uid" << 1 << "gid" << 1 << "socket" << 1 );
+ 		mongo::BSONObj q = mongo::fromjson(uems->json);
+-		// the connection object (will be automatically destroyed at each cycle)
+-		mongo::DBClientConnection c;
+-		// set the socket timeout
+-		c.setSoTimeout(uwsgi.socket_timeout);
+-		// connect
+-		c.connect(uems->address);
++
++		std::unique_ptr<mongo::DBClientBase> conn;
++
++		conn = std::unique_ptr<mongo::DBClientBase> (new mongo::DBClientConnection(true, 0, uwsgi.socket_timeout));
++		dynamic_cast<mongo::DBClientConnection *>(conn.get())->connect(uems->address);
+ 
+ 		if (uems->database && uems->username && uems->password) {
+ 			std::string err;
+-			if (c.auth(uems->database, uems->username, uems->password, err, uems->predigest ? false : true) == false) {
++			if (conn->auth(uems->database, uems->username, uems->password, err, uems->predigest ? false : true) == false) {
+ 				uwsgi_log_verbose("[emperor-mongodb] unable to authenticate to db %s: %s\n", uems->database, err.c_str());
+ 				return;
+ 			}
+ 		}
+ 
+ 		// run the query
+-		std::auto_ptr<mongo::DBClientCursor> cursor = c.query(uems->collection, q, 0, 0, &p);
++		std::unique_ptr<mongo::DBClientCursor> cursor = conn->query(uems->collection, q, 0, 0, &p);
+ 		while(cursor.get() && cursor->more() ) {
+                 	mongo::BSONObj p = cursor->next();
+ 
+@@ -89,7 +88,7 @@
+ 				b.appendElements(q);
+ 				b.append("name", c_ui->name);
+ 				mongo::BSONObj q2 = b.obj();
+-				cursor = c.query(uems->collection, q2, 0, 0, &p);
++				cursor = conn->query(uems->collection, q2, 0, 0, &p);
+ 				if (!cursor.get()) return;
+ #ifdef UWSGI_DEBUG
+ 				uwsgi_log("JSON: %s\n", q2.toString().c_str());
+--- a/plugins/gridfs/gridfs.cc
++++ b/plugins/gridfs/gridfs.cc
+@@ -40,25 +40,27 @@
+ static void uwsgi_gridfs_do(struct wsgi_request *wsgi_req, struct uwsgi_gridfs_mountpoint *ugm, char *itemname, int need_free) {
+ 
+ 	try {
+-		mongo::scoped_ptr<mongo::ScopedDbConnection> conn( mongo::ScopedDbConnection::getScopedDbConnection(ugm->server, ugm->timeout) );
++		std::unique_ptr<mongo::DBClientBase> conn;
++
++		conn = std::unique_ptr<mongo::DBClientBase> (new mongo::DBClientConnection());
++		dynamic_cast<mongo::DBClientConnection *>(conn.get())->connect(ugm->server);
++
+ 		try {
+ 			if (ugm->username && ugm->password) {
+ 				std::string errmsg;
+-				if ((*conn).conn().auth(ugm->db, ugm->username, ugm->password, errmsg)) {
++				if (!conn->auth(ugm->db, ugm->username, ugm->password, errmsg)) {
+ 					uwsgi_log("[uwsgi-gridfs]: %s\n", errmsg.c_str());
+-					(*conn).done();
+ 					uwsgi_403(wsgi_req);
+ 					return;
+ 				}
+ 			}
+-			mongo::GridFS gridfs((*conn).conn(), ugm->db);
+-			mongo::GridFile gfile = gridfs.findFile(itemname);
++			mongo::GridFS gridfs((*conn.get()), ugm->db);
++			mongo::GridFile gfile = gridfs.findFileByName(itemname);
+ 			if (need_free) {
+ 				free(itemname);
+ 				itemname = NULL;
+ 			}
+ 			if (!gfile.exists()) {
+-				(*conn).done();
+ 				uwsgi_404(wsgi_req);
+ 				return;
+ 			}
+@@ -111,11 +113,9 @@
+ 					uwsgi_response_write_body_do(wsgi_req, (char *) chunk, chunk_len);
+ 				}
+ 			}
+-			(*conn).done();
+ 		}
+ 		catch ( mongo::DBException &e ) {
+ 			uwsgi_log("[uwsgi-gridfs]: %s\n", e.what());
+-			(*conn).done();
+ 			if (need_free && itemname) {
+ 				free(itemname);
+ 				itemname = NULL;

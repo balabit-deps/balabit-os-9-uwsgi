@@ -1,0 +1,126 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: uWSGI
+Upstream-Contact: https://github.com/unbit/uwsgi/issues
+Source: https://github.com/unbit/uwsgi
+
+Files: *
+Copyright:
+  2009-2016  Unbit S.a.s <info@unbit.it>
+License-Grant:
+ GPL-2
+License: GPL-2
+Comment:
+ Source mentions a linking exception,
+ but it is uncertain for which code it aplies,
+ and whether it applies to derived works as well.
+
+Files:
+ apache2/*
+ core/uwsgi.c
+ plugins/router_xmldir/router_xmldir.c
+Copyright:
+  2013       Guido Berhoerster <guido+uwsgi@berhoerster.name>
+  2009-2010  Roger Florkowski <rflorkowski@mypublisher.com>
+  2009-2017  Unbit S.a.s <info@unbit.it>
+License-Grant:
+ This program is free software;
+ you can redistribute it and/or modify it
+ under the terms of the GNU General Public License
+ as published by the Free Software Foundation;
+ either version 2 of the License,
+ or (at your option) any later version.
+License: GPL-2+
+
+Files:
+ apache2/mod_proxy_uwsgi.c
+Copyright:
+  2009-2017  Unbit S.a.s. <info@unbit.it>
+License-Grant:
+ Licensed under the Apache License, Version 2.0
+ (the "License");
+ you may not use this file
+ except in compliance with the License.
+ You may obtain a copy of the License
+ at <http://www.apache.org/licenses/LICENSE-2.0>
+ .
+ Unless required by applicable law or agreed to in writing,
+ software distributed under the License is distributed
+ on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ either express or implied.
+ See the License for the specific language
+ governing permissions and limitations under the License.
+License: Apache-2.0
+
+Files:
+ core/rb_timers.c
+Copyright:
+  Igor Sysoev
+  Nginx, Inc.
+  Unbit S.a.s.
+License: GPL-2
+Comment:
+ Contains copyright but no license.
+ Licensing assumed same as generally for the project.
+
+Files:
+ core/hash.c
+Copyright:
+  Austin Appleby
+License-grant:
+ adapted from nginx
+License: GPL-2
+Comment:
+ Contains copyright but no license.
+ Licensing assumed same as generally for the project.
+
+Files:
+ debian/*
+Copyright:
+  2012-2013  Janos Guljas <janos@debian.org>
+  2013-2021  Jonas Smedegaard <dr@jones.dk>
+  2010       Leonid Borisenko <leo.borisenko@gmail.com>
+  2020-2021  Purism, SPC
+License-grant:
+ This program is free software;
+ you can redistribute it and/or modify it
+ under the terms of the GNU General Public License
+ as published by the Free Software Foundation;
+ either version 3,
+ or (at your option) any later version.
+License: GPL-3+
+Reference: debian/copyright
+
+Files:
+ debian/patches/0*
+Copyright:
+  Unbit S.a.s <info@unbit.it>
+License: GPL-2
+
+Files:
+ debian/patches/1*
+ debian/patches/2*
+Copyright:
+  Janos Guljas <janos@debian.org>
+  Jonas Smedegaard <dr@jones.dk>
+License-grant:
+ This packaging is free software;
+ you can redistribute it and/or modify it
+ under the terms of the GNU General Public License
+ as published by the Free Software Foundation;
+ either version 2,
+ or (at your option) any later version.
+License: GPL-2+
+Reference: debian/copyright
+
+License: Apache-2.0
+Reference: /usr/share/common-licenses/Apache-2.0
+
+License: GPL-2
+Reference: /usr/share/common-licenses/GPL-2
+
+License: GPL-2+
+Reference: /usr/share/common-licenses/GPL-2
+
+License: GPL-3+
+Reference: /usr/share/common-licenses/GPL-3

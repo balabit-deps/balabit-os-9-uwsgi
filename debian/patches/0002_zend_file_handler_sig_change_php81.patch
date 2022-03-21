@@ -1,0 +1,42 @@
+From: Riccardo Magliocchetti <riccardo.magliocchetti@gmail.com>
+Date: Sun, 30 Jan 2022 14:31:50 +0100
+Subject: [PATCH] plugins/php: handle php8.1 zend_file_handle signature change
+Origin: upstream, https://github.com/unbit/uwsgi/commit/8ca18da9a01eee19156243c5c0d28d2572698e4a
+
+filename is now a zend_string.
+
+Refs #2394
+---
+ plugins/php/php_plugin.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/plugins/php/php_plugin.c b/plugins/php/php_plugin.c
+index d336adddc..8b5a24156 100644
+--- a/plugins/php/php_plugin.c
++++ b/plugins/php/php_plugin.c
+@@ -1096,14 +1096,19 @@ int uwsgi_php_request(struct wsgi_request *wsgi_req) {
+ 
+ 	SG(request_info).path_translated = wsgi_req->file;
+ 
+-        memset(&file_handle, 0, sizeof(zend_file_handle));
+-        file_handle.type = ZEND_HANDLE_FILENAME;
+-        file_handle.filename = real_filename;
++#if PHP_VERSION_ID >= 80100
++	zend_string *handle_filename = zend_string_init(real_filename, real_filename_len, 0);
++#else
++	const char *handle_filename = real_filename;
++#endif
++	memset(&file_handle, 0, sizeof(zend_file_handle));
++	file_handle.type = ZEND_HANDLE_FILENAME;
++	file_handle.filename = handle_filename;
+ 
+-        if (php_request_startup() == FAILURE) {
++	if (php_request_startup() == FAILURE) {
+ 		uwsgi_500(wsgi_req);
+-                return -1;
+-        }
++		return -1;
++	}
+ 
+ 	struct uwsgi_string_list *usl=NULL;
+ 

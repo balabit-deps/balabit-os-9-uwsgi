@@ -1,0 +1,10 @@
+[Unit]
+Description=Socket for uWSGI app %i
+
+[Socket]
+ListenStream=/var/run/uwsgi/%i.socket
+SocketUser=www-data
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

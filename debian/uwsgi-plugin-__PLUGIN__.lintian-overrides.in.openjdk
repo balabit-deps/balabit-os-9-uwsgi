@@ -1,0 +1,3 @@
+# Allow RPATH in OpenJDK,
+# until http://bugs.debian.org/562622 is solved.
+binary-or-shlib-defines-rpath

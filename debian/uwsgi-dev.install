@@ -1,0 +1,2 @@
+debian/debhelper/dh_uwsgi /usr/bin
+debian/debhelper/uwsgi.pm /usr/share/perl5/Debian/Debhelper/Sequence

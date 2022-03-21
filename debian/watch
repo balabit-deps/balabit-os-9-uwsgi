@@ -1,0 +1,10 @@
+version=4
+# check: uscan --report
+# update: gbp import-orig --upstream-vcs-tag=vX.Y.Z --uscan
+
+opts=\
+dversionmangle=auto,repacksuffix=~dfsg,\
+downloadurlmangle=s%.*Changelog-@ANY_VERSION@\.html%https://projects.unbit.it/downloads/@PACKAGE@-$1.tar.gz%,\
+filenamemangle=s/.*Changelog-@ANY_VERSION@\.html/@PACKAGE@-$1.tar.gz/ \
+https://uwsgi-docs.readthedocs.io/en/latest/ \
+Changelog@ANY_VERSION@\.html

@@ -1,0 +1,597 @@
+#!/usr/bin/make -f
+
+include /usr/share/cdbs/1/rules/buildvars.mk
+
+# exclude broken plugins
+# (pkglist tweaking must be done before including most CDBS snippets)
+pkg_broken :=
+DEB_ARCH_PACKAGES := $(filter-out $(pkg_broken),$(DEB_ARCH_PACKAGES))
+DEB_INDEP_PACKAGES := $(filter-out $(pkg_broken),$(DEB_INDEP_PACKAGES))
+
+include /usr/share/cdbs/1/class/python-module.mk
+include /usr/share/cdbs/1/rules/debhelper.mk
+
+# TODO: Use only java-common (not java-helper) when bug#814783 is fixed in stable)
+-include /usr/share/javahelper/java-vars.mk
+-include /usr/share/java/java_defaults.mk
+
+# Needed by upstream build and (always) to build extermal modules
+deps-lib = libpcre3-dev, libssl-dev, uuid-dev, zlib1g-dev
+deps-lib +=, libcap-dev [linux-any], libjail-dev [kfreebsd-any]
+
+# Needed (always/often) to build external modules
+deps-dev = binutils, gcc, python3, python3-distutils, uwsgi-core
+deps-dev +=, libc6-dev | libc-dev
+deps-dev +=, libbsd-dev [kfreebsd-any]
+deps-dev-recommends = git, cppcheck
+
+# the equivalent of "uwsgi-core --dot-h | md5sum" at runtime
+abi = $(firstword $(shell echo | cat uwsgi.h - | md5sum))
+
+CDBS_BUILD_DEPENDS +=, $(deps-lib), 2to3
+CDBS_DEPENDS_uwsgi-dev +=, $(deps-lib), $(deps-dev)
+CDBS_RECOMMENDS_uwsgi-dev +=, $(deps-dev-recommends)
+CDBS_PROVIDES_uwsgi-core +=, uwsgi-abi-$(abi)
+CDBS_ENHANCES_uwsgi-dev +=, debhelper
+
+# resolve supported architectures for arch-varying build-dependencies
+# (in maintainer mode only: uses network and messes with control file)
+# * explicitly avoid powerpc for mono: Underlying libgdiplus is missing
+ifneq (,$(DEB_MAINTAINER_MODE))
+$(shell sh debian/pkgarchs.sh glusterfs-common > debian/ARCHS_glusterfs)
+$(shell sh debian/pkgarchs.sh python-greenlet-dev > debian/ARCHS_greenlet)
+$(shell sh debian/pkgarchs.sh openjdk-11-jdk > debian/ARCHS_openjdk11)
+$(shell sh debian/pkgarchs.sh libmono-2.0-dev | perl -pe 's/\bpowerpc\b//' > debian/ARCHS_mono)
+$(shell sh debian/pkgarchs.sh librados-dev > debian/ARCHS_rados)
+$(shell sh debian/pkgarchs.sh gccgo > debian/ARCHS_gccgo)
+endif
+UWSGI_ARCHLISTS = glusterfs greenlet openjdk11 \
+	mono rados gccgo
+$(foreach list,$(UWSGI_ARCHLISTS),\
+	$(eval UWSGI_ARCHS_$(list) := $(shell cat debian/ARCHS_$(list))))
+ifneq (,$(DEB_MAINTAINER_MODE))
+debian/control::
+	sed -i \
+		$(foreach list,$(UWSGI_ARCHLISTS),\
+			-e 's/@$(list)_archs@/$(UWSGI_ARCHS_$(list))/g') \
+		-e 's/@ruby_kind@/$(UWSGI_KIND_ruby)/g' \
+		debian/control
+endif
+
+# Common variables
+# ================
+
+UWSGI_ENV = CFLAGS="$(CFLAGS)" CPPFLAGS="$(CPPFLAGS)" LDFLAGS="$(LDFLAGS)"
+
+UWSGI_BUILDER = uwsgiconfig.py -v
+
+APACHE2_API := $(shell perl -ne 'print $$1 if m/our\s+\$$API\s+=\s+"(.*)"/' < $(shell which dh_apache2))
+APACHE2_BUILDER := apxs2 -c $(shell apr-config --link-ld) $(shell apu-config --link-ld)
+
+# Transform plugin's package name to plugin's name:
+# * delete dots
+# * replace '-' with '_'
+# * strip trailing openjdk delimiter
+pkg_name_to_plugin_name = $(strip \
+	$(subst openjdk_,openjdk,$(subst -,_,$(subst .,,$(1)))))
+
+UWSGI_PLUGIN_INFILES := $(wildcard debian/*__PLUGIN__*.in)
+UWSGI_PLUGINLANGS = python java lua ruby
+
+UWSGI_KINDS_python = python3
+UWSGI_SRCPLUGINS_LANG_SELF += python
+UWSGI_SRCPLUGINS_python = asyncio gevent greenlet tornado
+
+# TODO: avoid non-default java kinds until spearate package uwsgi-java added
+UWSGI_KINDS_java = openjdk-11
+UWSGI_DEFAULTKIND_java = openjdk-11
+UWSGI_SRCPLUGINS_java = jvm jwsgi ring servlet
+
+UWSGI_KINDS_lua = lua5.1 lua5.2
+UWSGI_DEFAULTKIND_lua = lua5.1
+UWSGI_SRCPLUGINS_LANG_SELF += lua
+
+# Ruby kinds resolved as per packaging team policy (see bug#755779)
+# TODO: simplify when ruby-all-dev is in stable
+# TODO: maybe simplify to call "dh_ruby --print-supported" when stable
+UWSGI_DEFAULTKIND_ruby := $(notdir $(shell readlink -f /usr/bin/ruby))
+UWSGI_KINDS_ruby := $(strip \
+	$(if $(wildcard /usr/lib/ruby/vendor_ruby/ruby_debian_dev.rb),\
+		$(shell ruby -rruby_debian_dev \
+			-e 'include RubyDebianDev;' \
+			-e 'SUPPORTED_RUBY_VERSIONS.select! do |version, binary|;' \
+				-e 'puts version;' \
+			-e 'end'),\
+		$(UWSGI_DEFAULTKIND_ruby)))
+# dirty hack: use only default kind even where multiple should work
+# TODO: support multiple Ruby kinds (requires dynamic control file sections)
+UWSGI_KINDS_ruby := $(filter $(UWSGI_DEFAULTKIND_ruby),$(UWSGI_KINDS_ruby))
+UWSGI_KIND_ruby := $(UWSGI_KINDS_ruby)$(strip $(if $(strip \
+	$(filter 1,$(words $(UWSGI_KINDS_ruby)))),\
+		,\
+		$(error ERROR: multiple Ruby kinds not supported)))
+UWSGI_SRCPLUGINS_ruby = rack
+
+UWSGI_PLUGIN_PACKAGES = $(filter uwsgi-plugin-%,$(DEB_PACKAGES))
+
+UWSGI_SRCPLUGINS_AVAILABLE := $(sort $(notdir $(wildcard plugins/*)))
+UWSGI_SRCPLUGINS_ZEROMQ = emperor_zeromq logzmq mongrel2
+UWSGI_SRCPLUGINS_ARCH_gccgo = gccgo
+# TODO: enable PyPy when supported by CDBS
+UWSGI_SRCPLUGINS_TODO = pypy
+# plugins not yet ready for production use
+UWSGI_SRCPLUGINS_EXPERIMENTAL = libffi libtcc router_spnego
+# plugins irrelevant/unusable for Debian
+UWSGI_SRCPLUGINS_ALIEN = airbrake alarm_speech matheval mongodb \
+    stackless emperor_mongodb gridfs mongodblog php \
+	stats_pusher_mongodb v8
+UWSGI_SRCPLUGINS_DEMO = cplusplus dumbloop dummy example exception_log
+UWSGI_SRCPLUGINS_UNKNOWN = legion_cache_fetch objc_gc pyuwsgi ruby19
+UWSGI_SRCPLUGINS_EXCLUDE = $(UWSGI_SRCPLUGINS_ALIEN) \
+	$(UWSGI_SRCPLUGINS_DEMO) $(UWSGI_SRCPLUGINS_EXPERIMENTAL) \
+	$(UWSGI_SRCPLUGINS_TODO) $(UWSGI_SRCPLUGINS_UNKNOWN) coroae
+UWSGI_SRCPLUGINS_WANTED = $(filter-out $(UWSGI_SRCPLUGINS_EXCLUDE),\
+	$(UWSGI_SRCPLUGINS_AVAILABLE))
+UWSGI_SRCPLUGINS_ADDON_LANG = $(call pkg_name_to_plugin_name,\
+	$(UWSGI_SRCPLUGINS_LANG_SELF) \
+	$(foreach lang,$(UWSGI_PLUGINLANGS),$(UWSGI_SRCPLUGINS_$(lang))))
+UWSGI_SRCPLUGINS_ADDON_MISC = alarm_curl alarm_xmpp curl_cron \
+	emperor_pg fiber gccgo geoip glusterfs graylog2 ldap mono psgi \
+	rados rbthreads router_access sqlite3 xslt
+# tun/tap is unavailable on the Hurd
+# systemd is available only on linux
+# tuntap plugin broken on kFreeBSD: https://github.com/unbit/uwsgi/issues/695
+UWSGI_SRCPLUGINS_SKIP = \
+	$(foreach list,$(UWSGI_ARCHLISTS),\
+		$(if $(filter-out $(UWSGI_ARCHS_$(list)),$(DEB_HOST_ARCH)),\
+			$(UWSGI_SRCPLUGINS_ARCH_$(list)))) \
+	$(if $(filter hurd,$(DEB_HOST_ARCH_OS)),\
+		tuntap) \
+	$(if $(filter kfreebsd,$(DEB_HOST_ARCH_OS)),\
+		tuntap) \
+	$(if $(filter-out linux,$(DEB_HOST_ARCH_OS)),\
+		systemd_logger)
+UWSGI_SRCPLUGINS_SKIPINSTALL =
+UWSGI_SRCPLUGINS_CORE = $(filter-out \
+	$(UWSGI_SRCPLUGINS_ADDON_LANG) $(UWSGI_SRCPLUGINS_ADDON_MISC) \
+	$(UWSGI_SRCPLUGINS_SKIP),\
+	$(UWSGI_SRCPLUGINS_WANTED))
+UWSGI_SRCPLUGINS_CORE_INSTALL = $(filter-out \
+	$(UWSGI_SRCPLUGINS_SKIPINSTALL),\
+	$(UWSGI_SRCPLUGINS_CORE))
+
+UWSGI_MODULE_INFILES := $(wildcard debian/*__MODULE__*.in)
+
+UWSGI_MODULES_apache = uwsgi ruwsgi proxy-uwsgi
+
+# types of packaging scripts to use (tried from left to right)
+# * pri: binary and library
+# * sec: only binary
+# * aux: only library
+# * *-py: same as above but for (potentially) multiple python flavors
+# * openjdk: non-java code linked against OpenJDK
+# * python: python hooks
+# * single: only one flavor exist
+UWSGI_PKGSCRIPTS_DEFAULT = sec
+UWSGI_PKGSCRIPTS_jvm = openjdk pri
+UWSGI_PKGSCRIPTS_jwsgi = openjdk aux
+UWSGI_PKGSCRIPTS_ring = openjdk aux
+UWSGI_PKGSCRIPTS_servlet = openjdk aux
+UWSGI_PKGSCRIPTS_lua = pri
+UWSGI_PKGSCRIPTS_mono = pri
+UWSGI_PKGSCRIPTS_rack = pri
+UWSGI_PKGSCRIPTS_rbthreads = single aux
+UWSGI_PKGSCRIPTS_fiber = single aux
+UWSGI_PKGSCRIPTS_python = python pri-py pri
+UWSGI_PKGSCRIPTS_gevent = python aux-py aux
+UWSGI_PKGSCRIPTS_greenlet = python aux-py aux
+UWSGI_PKGSCRIPTS_tornado = python aux-py aux
+UWSGI_PKGSCRIPTS_asyncio = python aux-py aux
+
+# Stem-based variables
+# ====================
+
+pkg_name = $(cdbs_curpkg)
+
+plugin_name = $(call pkg_name_to_plugin_name,$*)
+plugin_is_lang = $(strip $(or \
+	$(foreach lang,$(UWSGI_PLUGINLANGS),\
+		$(if $(filter $(UWSGI_KINDS_$(lang)),$*),$(lang)))))
+plugin_implies_lang = $(strip $(or \
+	$(if $(filter rbthreads fiber,$*),\
+		ruby)))
+plugin_has_lang = $(strip $(foreach lang,$(UWSGI_PLUGINLANGS),\
+	$(foreach srcplugin,$(UWSGI_SRCPLUGINS_$(lang)),\
+		$(foreach kind,$(UWSGI_KINDS_$(lang)),\
+			$(if $(filter $(srcplugin)-$(kind),$*),\
+				$(lang))))))
+plugin_lang = $(strip $(or \
+	$(plugin_is_lang),\
+	$(plugin_implies_lang),\
+	$(plugin_has_lang)))
+plugin_stem = $(strip $(or \
+	$(plugin_is_lang),\
+	$(foreach kind,$(UWSGI_KINDS_$(plugin_has_lang)),\
+		$(patsubst %-$(kind),%,$(filter %-$(kind),$*)))))
+plugin_kind = $(strip $(or \
+	$(if $(plugin_is_lang),\
+		$*),\
+	$(foreach kind,$(UWSGI_KINDS_$(plugin_has_lang)),\
+		$(if $(filter %-$(kind),$*),\
+			$(kind)))))
+plugin_src = $(strip \
+	$(call pkg_name_to_plugin_name,$(or \
+		$(plugin_stem),\
+		$*)))
+plugin_lang_stem = $(strip \
+	$(if $(filter java,$(plugin_lang)),\
+		$(firstword $(subst -, ,$(plugin_kind)))))
+plugin_lang_kind = $(strip \
+	$(if $(filter java python,$(plugin_lang)),\
+		$(lastword $(subst -, ,$(plugin_kind)))))
+# workaround for #868752
+#plugin_flavors = $(strip \
+#	$(if $(filter python,$(plugin_lang)),\
+#		$(cdbs_$(plugin_lang_kind:python=python2)_allflavors)))
+plugin_flavors = $(plugin_defaultflavor)
+# workaround end
+plugin_defaultflavor = $(strip \
+	$(if $(filter python,$(plugin_lang)),\
+		$(cdbs_$(plugin_lang_kind:python=python2)_defaultflavor)))
+plugin_interpreter = $(strip $(or \
+	$(if $(filter ruby,$(plugin_lang)),\
+		/usr/bin/$(strip $(or \
+			$(plugin_kind),\
+			$(UWSGI_DEFAULTKIND_ruby))))))
+plugin_alternatives_name = uwsgi-plugin-$(strip $(or \
+	$(if $(filter python,$(plugin_is_lang)),\
+		$(plugin_lang_kind)),\
+	$(if $(filter python,$(plugin_has_lang)),\
+		$(plugin_stem)-$(plugin_lang_kind)),\
+	$(plugin_stem),\
+	$(plugin_name)))
+plugin_alternatives_stem = $(strip $(or \
+	$(if $(filter python,$(plugin_is_lang)),\
+		$(plugin_lang_kind)),\
+	$(plugin_stem)))
+plugin_alternatives_priority = $(strip \
+	$(if $(filter $(plugin_kind),$(UWSGI_DEFAULTKIND_$(plugin_lang))),\
+		75,\
+		35))
+plugin_flavor_prefix = $(strip \
+	$(if $(filter python,$(plugin_is_lang)),\
+		,\
+		$(plugin_stem)_))
+
+# per-infile variables, relying on $(infile) and optional $(plugin_src)
+plugin_pkgtypes = $(or $(UWSGI_PKGSCRIPTS_$(plugin_src)),$(UWSGI_PKGSCRIPTS_DEFAULT))
+plugin_has_binary = $(filter pri sec,$(plugin_pkgtypes))
+# plugin_infile picks first existing infile variant:
+# 1. $(infile).$(UWSGI_PKGSCRIPTS_$(plugin_src))
+# 2. $(infile).$(UWSGI_PKGSCRIPTS_DEFAULT)
+# 3. $(infile)
+plugin_infile = $(firstword $(wildcard \
+	$(foreach suffix,$(plugin_pkgtypes),\
+		$(addsuffix .$(suffix),$(infile))) \
+	$(infile) \
+	))
+
+module_name = $(subst -,_,$(subst ruwsgi,Ruwsgi,$*))
+module_apachename = $(subst -,_,$(subst ruwsgi,uwsgi,$*))
+
+# CDBS-specific variables
+# =======================
+
+DEB_COMPRESS_EXCLUDE_uwsgi-core = .ini .lua .pl .png .psgi .py .ru .ws .xml \
+                                  .yml
+DEB_COMPRESS_EXCLUDE_uwsgi-extra = .class .java .rb .c
+
+DEB_DH_STRIP_ARGS_uwsgi-core := --dbg-package=uwsgi-dbg
+$(foreach pkg, $(UWSGI_PLUGIN_PACKAGES), $(eval \
+	DEB_DH_STRIP_ARGS_$(pkg) := --dbg-package=uwsgi-dbg))
+
+DEB_INSTALL_DOCS_ALL += $(DEB_SRCDIR)/CONTRIBUTORS
+
+DEB_DH_INSTALL_ARGS_python3-uwsgidecorators = 2to3/uwsgidecorators.py usr/lib/python3/dist-packages
+
+# FIXME: install in separate package uwsgi-java
+DEB_DH_INSTALL_ARGS_uwsgi-plugin-jvm-$(UWSGI_DEFAULTKIND_java) = plugins/jvm/uwsgi.jar /usr/share/java
+
+$(foreach module, $(UWSGI_MODULES_apache),\
+	$(eval CDBS_DEPENDS_libapache2-mod-$(module) = $(APACHE2_API:%=apache2-api-%))\
+	$(eval CDBS_RECOMMENDS_libapache2-mod-$(module) = uwsgi-core)\
+	$(eval CDBS_SUGGESTS_libapache2-mod-$(module) = uwsgi)\
+)
+
+# Rules
+# =====
+
+clean::
+	$(cdbs_python3_defaultruntime) $(UWSGI_BUILDER) --clean
+	find -type f -name '*.pyc' -delete
+	find -type d -name __pycache__ -delete
+	find -type f \( -name '*.class' -or -name '*.jar' \) -delete
+	rm -f plugins/mono/uwsgi.dll plugins/mono/uwsgi.key
+	rm -f *_plugin.so
+	find debian \
+		-regextype posix-egrep -regex \
+		'.*/uwsgi-plugin-.*\.(install|dirs|links|manpages|postinst|prerm|lintian-overrides|rtupdate)' \
+		-delete
+	rm -f debian/*.1
+	rm -f debian/stamp-*
+	rm -f uwsgibuild.*
+
+# add per-package hook to expand packaging files as patch before configure
+apply-patches:: \
+ $(patsubst %,debian/expand-files/%,$(DEB_ALL_PACKAGES))
+$(patsubst %,debian/expand-files/%,$(DEB_ALL_PACKAGES)): \
+ debian/expand-files/%: \
+ | debian/expand-files
+debian/expand-files: post-patches
+	mkdir debian/expand-files
+clean::
+	rm -rf debian/expand-files
+
+# uwsgi-core package
+# ------------------
+
+debian/expand-files/uwsgi-core:
+	set -e; \
+	echo "uwsgi-core usr/bin" > debian/$(cdbs_curpkg).install; \
+	echo "debian/uwsgi-files/systemd/* lib/systemd/system" >> debian/$(cdbs_curpkg).install; \
+	for PLUGIN_NAME in $(UWSGI_SRCPLUGINS_CORE_INSTALL); do \
+		echo "$${PLUGIN_NAME}_plugin.so usr/lib/uwsgi/plugins" \
+			>> debian/$(cdbs_curpkg).install; \
+	done
+	touch $@
+clean::
+	rm -f debian/uwsgi-core.install
+
+substvars-list-encode = perl -0 -F'/\s+/' -ane 'print " * ", join("\$${Newline} * ",@F)'
+uwsgi-coreplugins := $(call pkg_name_to_plugin_name,$(UWSGI_SRCPLUGINS_CORE_INSTALL))
+uwsgi-corepluginlist := $(shell echo $(uwsgi-coreplugins) | $(substvars-list-encode))
+build/uwsgi-core:: uwsgi-core
+uwsgi-core: uwsgi-core-local
+	$(UWSGI_ENV) $(cdbs_python3_defaultruntime) $(UWSGI_BUILDER) \
+		--build debian/buildconf/uwsgi-core.ini
+	
+	set -e; \
+	for PLUGIN_NAME in $(UWSGI_SRCPLUGINS_CORE); do \
+		$(UWSGI_ENV) $(cdbs_python3_defaultruntime) $(UWSGI_BUILDER) \
+		--plugin plugins/$${PLUGIN_NAME} \
+		debian/buildconf/uwsgi-plugin.ini \
+		$${PLUGIN_NAME}; \
+	done
+install/uwsgi-core::
+	echo 'uwsgi:corepluginlist=$(uwsgi-corepluginlist)' >> debian/$(cdbs_curpkg).substvars
+clean::
+	rm -f uwsgi-core
+	find -type l -name 'uwsgi_*' -delete
+
+uwsgi-rubyplugins = $(foreach kind,$(UWSGI_KINDS_ruby),\
+	$(patsubst %,%-$(kind),$(UWSGI_SRCPLUGINS_ruby)))
+uwsgi-rubyplugins += rbthreads fiber
+uwsgi-rubypkghint = $(patsubst %,uwsgi-plugin-%,$(uwsgi-rubyplugins))
+uwsgi-rubypkghint += uwsgi-plugins-all uwsgi-app-integration-plugins
+$(patsubst %,install/%,$(uwsgi-rubypkghint))::
+	echo 'uwsgi:RubyKinds=$(UWSGI_KINDS_ruby)' >> debian/$(cdbs_curpkg).substvars
+	echo 'uwsgi:RubyKind=$(UWSGI_KIND_ruby)' >> debian/$(cdbs_curpkg).substvars
+	echo 'uwsgi:RubyDefaultkind=$(UWSGI_DEFAULTKIND_ruby)' >> debian/$(cdbs_curpkg).substvars
+
+DEB_INSTALL_DOCS_uwsgi-core += tests
+
+# move installed examples into subdirs by type
+ex_types = conffile psgi rack router wsapi wsgi
+ex_conffile = mega.xml multi.* sites.xml uwsgi.xml vassals werkzeug_strict.yml werkzeug.*
+ex_rack = config.ru config2.ru fibers.*
+ex_router = router.lua uwsgirouter*
+ex_psgi = mojoapp.pl
+ex_wsapi = *.ws
+ex_wsgi = mjpeg_stream.py multiapp.py simple_app.py simple_app_wsgi2.py taskqueue.py
+ex_drop = bootstrap* config*.lua config??.ru corostream.pl debug.ini
+ex_drop += flaskpost.py heavytest.* info_uwsgi.php logic.ini
+ex_drop += protected.ini welcome.ini welcome3.py
+binary-post-install/uwsgi-core::
+	set -e; \
+	cd debian/$(cdbs_curpkg)/usr/share/doc/$(cdbs_curpkg)/examples; \
+	$(foreach type, $(ex_types),mkdir $(type); mv -t $(type) $(ex_$(type));) \
+	rm $(ex_drop)
+
+install/uwsgi-core::
+	help2man \
+		--name 'fast (pure C), self-healing, developer-friendly WSGI server' \
+		--section 1 \
+		--no-info \
+		./uwsgi-core \
+		> debian/uwsgi-core.1
+
+# uwsgi-plugin-% packages
+# -----------------------
+
+# setup hook for building plugins
+$(patsubst %,build/%,$(UWSGI_PLUGIN_PACKAGES)):: \
+ build/uwsgi-plugin-%: \
+ uwsgi-core-local debian/stamp-uwsgi-plugin-%
+
+uwsgi-core-local:
+	$(UWSGI_ENV) $(cdbs_python3_defaultruntime) $(UWSGI_BUILDER) \
+		--build debian/buildconf/uwsgi-plugin.ini
+clean::
+	rm -f uwsgi-core-local
+
+#  * eval'ing JAVA_HOME needed to resolve JVM_SERVER_DIR
+$(patsubst %,debian/stamp-%,$(UWSGI_PLUGIN_PACKAGES)): \
+ debian/stamp-uwsgi-plugin-%:
+	$(if $(filter java,$(plugin_lang)),\
+		$(eval JAVA_HOME = /usr/lib/jvm/java-$(plugin_lang_kind)-$(plugin_lang_stem)-$(DEB_HOST_ARCH)))
+	$(if $(filter java,$(plugin_lang)),\
+		UWSGICONFIG_JVM_INCLUDES='-I$(JAVA_HOME)/include $(_jvm_osinclude:%=-I$(JAVA_HOME)/include/%)') \
+	$(if $(filter java,$(plugin_lang)),\
+		UWSGICONFIG_JVM_LIBPATH='$(JVM_SERVER_DIR)') \
+	$(if $(filter lua,$(plugin_lang)),\
+		UWSGICONFIG_LUAPC=$(plugin_kind)) \
+	$(if $(filter ruby,$(plugin_lang)),\
+		UWSGICONFIG_RUBYPATH=$(plugin_interpreter)) \
+	$(if $(filter python,$(plugin_lang)),\
+		$(foreach flavor,$(plugin_flavors),\
+			$(UWSGI_ENV) $(call cdbs_expand_pythonruntime,,$(flavor)) \
+				$(UWSGI_BUILDER) \
+				--plugin plugins/$(plugin_src) \
+				debian/buildconf/uwsgi-plugin.ini \
+				$(plugin_flavor_prefix)$(subst .,,$(flavor));),\
+		$(UWSGI_ENV) $(cdbs_python3_defaultruntime) $(UWSGI_BUILDER) \
+			--plugin plugins/$(plugin_src) \
+			debian/buildconf/uwsgi-plugin.ini \
+			$(plugin_name))
+	touch $@
+
+# resolve packaging scripts and man pages
+# ---------------------------------------
+
+$(patsubst %,debian/expand-files/%,$(UWSGI_PLUGIN_PACKAGES)): \
+ debian/expand-files/uwsgi-plugin-%:
+	set -e; \
+	$(foreach infile,$(UWSGI_PLUGIN_INFILES),\
+		$(if $(shell test -s "$(plugin_infile)" && echo "not empty"),\
+			sed \
+				-e 's/@@pkg_name@@/$(pkg_name)/g' \
+				-e 's/@@plugin_name@@/$(plugin_name)/g' \
+				-e 's/@@plugin_stem@@/$(plugin_stem)/g' \
+				-e 's/@@plugin_alternatives_name@@/$(plugin_alternatives_name)/g' \
+				-e 's/@@plugin_alternatives_stem@@/$(plugin_alternatives_stem)/g' \
+				-e 's/@@plugin_alternatives_priority@@/$(plugin_alternatives_priority)/g' \
+				-e 's/@@plugin_lang_kind@@/$(plugin_lang_kind)/g' \
+				-e 's/@@plugin_flavors_dotless@@/$(subst .,,$(plugin_flavors))/g' \
+				-e 's/@@plugin_defaultflavor_dotless@@/$(subst .,,$(plugin_defaultflavor))/g' \
+				< $(plugin_infile) \
+				> $(subst __PLUGIN__,$*,$(basename $(infile)));))\
+	$(if $(filter python,$(plugin_lang)),\
+		$(foreach flavor,$(plugin_flavors),\
+			$(foreach infile,install $(if $(plugin_has_binary),links manpages),sed \
+				-e "s/@@plugin_name@@/$(plugin_flavor_prefix)$(subst .,,$(flavor))/g" \
+				< debian/uwsgi-plugin-__PLUGIN__.$(infile).in \
+				>> debian/$(cdbs_curpkg).$(infile);))\
+		chmod 755 debian/$(cdbs_curpkg).rtupdate;\
+		echo "debian/$(cdbs_curpkg).rtupdate usr/share/$(plugin_lang_kind)/runtime.d" \
+			>> debian/$(cdbs_curpkg).install )
+	touch $@
+
+$(patsubst %,install/%,$(UWSGI_PLUGIN_PACKAGES)):: \
+ install/uwsgi-plugin-%:
+	set -e; \
+	$(if $(plugin_has_binary),$(if $(filter python,$(plugin_lang)),\
+		$(foreach flavor,$(plugin_flavors), \
+			ln -sf uwsgi-core-local uwsgi_$(plugin_flavor_prefix)$(subst .,,$(flavor));\
+			help2man \
+				--name 'fast (pure C)$(comma) self-healing$(comma) developer-friendly WSGI server' \
+				--section 1 \
+				--no-info \
+				./uwsgi_$(plugin_flavor_prefix)$(subst .,,$(flavor)) \
+				> debian/uwsgi_$(plugin_flavor_prefix)$(subst .,,$(flavor)).1;),\
+		ln -sf uwsgi-core-local uwsgi_$(plugin_name);\
+		help2man \
+			--name 'fast (pure C)$(comma) self-healing$(comma) developer-friendly WSGI server' \
+			--section 1 \
+			--no-info \
+			./uwsgi_$(plugin_name) \
+			> debian/uwsgi_$(plugin_name).1))
+
+# custom handling of Mono package.
+binary-strip/uwsgi-plugin-mono::
+	dh_clistrip -p$(cdbs_curpkg) --dbg-package=uwsgi-dbg
+binary-fixup/uwsgi-plugin-mono::
+	dh_clifixperms -p$(cdbs_curpkg)
+binary-predeb/uwsgi-plugin-mono::
+	dh_shlibdeps -p$(cdbs_curpkg)
+	dh_makeclilibs -p$(cdbs_curpkg) -V
+	dh_installcligac -p$(cdbs_curpkg)
+	dh_clideps -p$(cdbs_curpkg)
+
+# libapache2-mod-% packages
+# -------------------------
+
+$(patsubst %,build/libapache2-mod-%,$(UWSGI_MODULES_apache)):: \
+ build/%: \
+ debian/stamp-%
+$(patsubst %,debian/stamp-libapache2-mod-%,$(UWSGI_MODULES_apache)): \
+ debian/stamp-libapache2-mod-%:
+	$(UWSGI_ENV) $(APACHE2_BUILDER) apache2/mod_$(module_name).c
+	touch $@
+clean::
+	rm -rf apache2/.libs
+	rm -f apache2/*.la apache2/*.lo apache2/*.slo
+
+$(patsubst %,binary-predeb/libapache2-mod-%,$(UWSGI_MODULES_apache))::
+	dh_apache2 -p$(cdbs_curpkg)
+
+$(patsubst %,debian/expand-files/libapache2-mod-%,$(UWSGI_MODULES_apache)): \
+ debian/expand-files/libapache2-mod-%:
+	echo 'LoadModule $(module_apachename)_module /usr/lib/apache2/modules/mod_$(module_name).so' \
+		> debian/$(module_name).load
+	$(if $(filter proxy-uwsgi,$*),\
+		perl -ni -e 'print "# Depends: proxy\n$$_"' \
+			debian/$(module_name).load)
+	set -e; \
+	$(foreach infile,$(UWSGI_MODULE_INFILES),sed \
+		-e 's/@@pkg_name@@/$(pkg_name)/g' \
+		-e 's/@@module_name@@/$(module_name)/g' \
+		< $(infile) \
+		> $(subst __MODULE__,$*,$(basename $(infile)));)
+	touch $@
+clean::
+	rm -f $(foreach module,$(UWSGI_MODULES_apache),\
+		$(subst __MODULE__,$(module),$(basename $(UWSGI_MODULE_INFILES))))
+	rm -f debian/*.load
+
+# Python module packages
+# ----------------------
+
+# convert Python 2.x module to Python 3
+build/python3-uwsgidecorators:: \
+ 2to3/uwsgidecorators.py
+2to3/uwsgidecorators.py:
+	mkdir -p 2to3
+	2to3 --output-dir=2to3 --write --nobackups --no-diffs \
+		uwsgidecorators.py
+clean::
+	rm -rf 2to3
+
+# put aside a copy of plugins code before configure
+common-configure-arch common-configure-indep:: debian/stamp-codemirror
+debian/stamp-codemirror:: post-patches
+	rm -rf plugins-src
+	cp -a plugins plugins-src
+	touch $@
+clean::
+	rm -rf plugins-src
+	rm -f debian/stamp-codemirror
+
+common-build-indep:: debian/test-shellcheck
+debian/test-shellcheck:
+	find debian \
+		-type f -not -empty -regextype egrep \
+		-regex '.*(postinst|prerm|rtupdate|init\.d).*' \
+		-exec shellcheck -e SC1090,SC1091,SC2034,SC2043 -s sh {} +
+	shellcheck -e SC1091,SC2001,SC2034,SC2162 -s bash debian/uwsgi-files/init/*
+	touch $@
+clean::
+	rm -f debian/test-shellcheck
+
+# source package
+# --------------
+
+binary-post-install/uwsgi-src::
+	find debian/$(cdbs_curpkg)/usr/src/uwsgi \
+		-type f \( \
+			-name '*.class' -or -name '*.jar' \
+			-or -name '*.key' -or -name '*.dll' \
+		\) -delete
+
+# Generate manpages during build
+DEB_INSTALL_MANPAGES_uwsgi-dev = debian/debhelper/dh_uwsgi.1
+common-post-build-arch:: debian/stamp-manpage-build
+debian/stamp-manpage-build:
+	pod2man debian/debhelper/dh_uwsgi > debian/debhelper/dh_uwsgi.1
+	touch $@
+clean::
+	rm -f debian/debhelper/dh_uwsgi.1

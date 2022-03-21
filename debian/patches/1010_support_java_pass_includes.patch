@@ -1,0 +1,20 @@
+Description: Support passing precomposed JVM INCLUDES string
+ Needed for OpenJDK 8 requiring arch-specific include (see bug#760301).
+Author: Jonas Smedegaard <dr@jones.dk>
+Last-Update: 2016-02-13
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/plugins/jvm/uwsgiplugin.py
++++ b/plugins/jvm/uwsgiplugin.py
+@@ -49,6 +49,11 @@
+     pass
+ 
+ try:
++    JVM_INCPATH = [os.environ['UWSGICONFIG_JVM_INCLUDES']]
++except:
++    pass
++
++try:
+     JVM_LIBPATH = ['-L' + os.environ['UWSGICONFIG_JVM_LIBPATH']]
+ except:
+     pass

@@ -1,0 +1,17 @@
+[Unit]
+Description=uWSGI Emperor
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/uwsgi --ini /etc/uwsgi-emperor/emperor.ini
+RuntimeDirectory=uwsgi
+Restart=always
+KillSignal=SIGQUIT
+Type=notify
+StandardError=journal
+NotifyAccess=all
+Group=www-data
+RuntimeDirectoryMode=0775
+
+[Install]
+WantedBy=multi-user.target
